@@ -1,0 +1,147 @@
+TASK 1: UHF 2U ANTENNA DEPLOYMENT TEST PLAN
+Author: System Test Engineer, EnduroSat
+
+======================================================================
+1. SYSTEM SUMMARY (basis for the test strategy)
+======================================================================
+Hardware
+  - 4 rods, 4 burn resistors (A1, A2, B1, B2), 2 burn wires.
+  - Wire 1 (A1 + B1) releases rods 1 and 2. Wire 2 (A2 + B2) releases rods 3 and 4.
+
+Burn sequence (identical for the MCU and the GPO algorithm)
+  t = 0 s   A1, A2 ON
+  t = 5 s   B1, B2 ON
+  t = 10 s  A1, A2 OFF
+  t = 15 s  B1, B2 OFF
+  Each pair is ON for 10 s, staggered by 5 s. If one pair is faulty, the
+  other pair is still ON for a full 10 s.
+
+Antenna MCU logic (primary)
+  - If Boot_Cnt < MaxBoot_Cnt_Ant (100): wait 120 s.
+  - First boot (Robust_Flag_Ant = 1): clear the flag and run the algorithm.
+    Later boots: if the antenna is already deployed, exit; otherwise run it.
+  - After the algorithm, check status; if not deployed, run it a second time.
+
+UHF transceiver logic (backup)
+  - If Boot_Cnt < MaxBoot_Cnt_UHF (150): wait 300 s (MCU always acts first).
+  - Up to 4 loops. Each loop: check status, exit if deployed.
+  - MCU reachable: even loop -> command the MCU algorithm, odd loop -> GPO algorithm.
+  - MCU not reachable / algorithm running: wait in 1 s steps; after a 2 min
+    timeout run the GPO algorithm directly (independent of the MCU).
+  - Then check status, wait 5 s, next loop.
+
+Redundancy layers under test
+  L1  Pair A / pair B staggering          -> TC-2
+  L2  Antenna MCU (2 attempts)            -> TC-1
+  L3  UHF transceiver, MCU and GPO paths  -> TC-3
+
+Prioritisation: one test case per layer, ordered from the most likely
+(nominal) path to the most critical fault-tolerance behaviour.
+
+======================================================================
+2. TEST CASES
+======================================================================
+
+----------------------------------------------------------------------
+TC-1: Nominal Deployment via Antenna MCU (First Boot)
+----------------------------------------------------------------------
+Objective:
+  Verify that the primary deployment path releases all four rods with the
+  specified timing and flag handling.
+
+High-Level Execution Steps:
+  1. Prepare a fresh unit: Robust_Flag_Ant = 1, Boot_Cnt below both limits,
+     antenna not deployed. Connect a logic analyser to A1, A2, B1, B2 and a
+     monitor for antenna/deployment status.
+  2. Power on the unit and start the timer (t0).
+  3. Record the time at which A1 and A2 switch ON.
+  4. Record all remaining resistor transitions.
+  5. After completion, read Robust_Flag_Ant and the antenna status.
+  6. Keep the unit powered past 300 s and observe the UHF transceiver.
+
+Expected Outcome / Success Criteria:
+  - A1/A2 ON at t0 + 120 s (+/- tolerance), B1/B2 ON 5 s later,
+    A1/A2 OFF 5 s after that, B1/B2 OFF 5 s after that.
+  - Robust_Flag_Ant = 0.
+  - Status = deployed; rods 1-4 released.
+  - No second MCU attempt is started.
+  - At ~300 s the UHF transceiver sees "deployed" and starts no burn.
+
+----------------------------------------------------------------------
+TC-2: Burn Resistor Redundancy with a Failed Pair / Resistor
+----------------------------------------------------------------------
+Objective:
+  Prove that the staggered A/B design still cuts both burn wires when one
+  resistor pair (or a single resistor) is faulty.
+
+High-Level Execution Steps:
+  1. Disable pair A (A1 and A2, e.g. open circuit); keep pair B healthy.
+  2. Trigger the MCU deployment algorithm.
+  3. Measure the ON time of B1 and B2 and check the rod status.
+  4. Repeat with pair B disabled (pair A healthy).
+  5. Repeat with a single resistor disabled (e.g. A1, then B2).
+  6. Negative control: disable both resistors of one wire (A1 + B1) and
+     confirm the test detects the incomplete deployment.
+
+Expected Outcome / Success Criteria:
+  - The healthy resistors are ON for a full 10 s each.
+  - Both wires are cut, rods 1-4 released, status = deployed, no retry needed
+    (steps 1-5).
+  - Step 6: only rods 3 and 4 are released, status = not deployed, and the
+    MCU performs its second attempt (confirms the test is sensitive to failure).
+
+----------------------------------------------------------------------
+TC-3: UHF Transceiver Fallback when the Antenna MCU Is Unavailable
+----------------------------------------------------------------------
+Objective:
+  Verify that the independent UHF/GPO path deploys the antenna when the
+  antenna MCU fails or cannot be reached.
+
+High-Level Execution Steps:
+  1. Disable the antenna MCU (hold in reset or cut the MCU link); keep the
+     GPO lines Release A / Release B connected. Boot_Cnt below the UHF limit,
+     antenna not deployed.
+  2. Power on the UHF transceiver and start the timer.
+  3. Observe that nothing happens for 300 s.
+  4. Observe the wait period (1 s polling) up to the 2 min timeout.
+  5. Measure the GPO Release A / Release B timing and the resistor response.
+  6. Read the antenna status and confirm the loop terminates.
+  7. Variant a: also block the GPO path -> confirm 4 loops, then stop.
+     Variant b: MCU reachable but wire 1 unburnable -> confirm attempts
+     alternate MCU / GPO (even loop = MCU, odd loop = GPO).
+
+Expected Outcome / Success Criteria:
+  - No activity before ~300 s; GPO algorithm starts at ~420 s (300 s + 120 s
+    timeout) with the same 0 / 5 / 10 / 15 s resistor sequence.
+  - Antenna deployed, loop exits, no further burns.
+  - Variant a: exactly 4 attempts (~420, 560, 700, 840 s), then a safe end.
+  - Variant b: UHF attempts alternate MCU, GPO, MCU, GPO, 20 s apart
+    (15 s burn + 5 s pause).
+
+======================================================================
+3. NOT INCLUDED (lower priority / variants of the above)
+======================================================================
+  - Power loss / reboot during burning.
+  - Boot counter at or above MaxBoot_Cnt_Ant / MaxBoot_Cnt_UHF.
+  - Boot with antenna already deployed.
+  - MCU algorithm running while UHF polls ("algorithm running" branch).
+
+======================================================================
+4. ASSUMPTIONS / OPEN POINTS FOR THE DESIGNER
+======================================================================
+  - The diagram's first "alt" box encloses only the 120 s delay; assumed that
+    Boot_Cnt gates the whole MCU routine.
+  - Start of the 2 min timeout (algorithm running vs. no communication) is
+    not explicit; assumed it starts when the condition is first seen.
+  - Minimum ON time needed to cut a burn wire is not given; the Python model
+    assumes 10 s per single resistor.
+  - Timing tolerances are not specified and must be defined for the real test.
+
+======================================================================
+5. PYTHON TEST PROCEDURE
+======================================================================
+  uhf_antenna_deployment_sim.py    virtual-time model of the MCU/UHF logic
+  test_uhf_antenna_deployment.py   automated checks for TC-1, TC-2, TC-3
+  Run: python -m unittest test_uhf_antenna_deployment -v
+  The model validates the test design and expected values (timings, counters);
+  on real hardware the same checks apply to logic-analyser captures.
